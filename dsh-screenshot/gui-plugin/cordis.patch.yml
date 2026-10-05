@@ -1,0 +1,16 @@
+# ============================================================================
+# dsh-shot-button — DSH bundle patch
+# ============================================================================
+# 本文件是插件的“挂载声明”。DSH 启动时按 bundle 层栈叠加各插件的 patch，
+# 这一条会把 dsh-shot-button 这个 cordis 插件注册进 Web profile 的配置树。
+#
+# 安装（在任意目录执行）：
+#   dsh plugin --profile web add link:<本仓库 gui-plugin 目录的绝对路径>
+# 装完需要重启 dsh web，然后 F5 刷新浏览器。
+#
+# 注意：id 与下面的 name 都必须是包名 dsh-shot-button，否则 loader 解析不到。
+# ============================================================================
+
+- insert:
+    - id: dsh-shot-button
+      name: dsh-shot-button

@@ -1,0 +1,21 @@
+{
+  "port": 38901,
+  "alwaysInsertReference": false,
+  "referencePrefix": "shots/",
+  "buttonsGap": 6,
+  "composerPaddingRight": null,
+
+  "plainButton": {
+    "enabled": true,
+    "color": null,
+    "title": "截屏并插入（全屏 / 窗口 / 框选）",
+    "hidesWindow": false
+  },
+
+  "hideButton": {
+    "enabled": true,
+    "color": "#2f7bf6",
+    "title": "截屏并插入 · 先隐藏当前窗口再截（QQ 式，全屏 / 窗口 / 框选）",
+    "hidesWindow": true
+  }
+}
