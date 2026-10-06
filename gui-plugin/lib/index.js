@@ -51,6 +51,75 @@ function readConfig() {
   return cfg
 }
 
+// --- keeping the resident shot service alive -------------------------------
+//
+// shotd.exe owns the global hotkeys and the hide-before-capture behaviour, so it has
+// to be running. This plugin lives inside the `dsh web` process: DSH starting brings
+// the service up, and a periodic probe means a crash heals by itself instead of
+// silently downgrading those features.
+
+const DAEMON_EXE = path.resolve(PACKAGE_ROOT, '..', 'tools', 'shotd.exe')
+
+function daemonPath() {
+  return DAEMON_EXE
+}
+
+/** True when the service answers on its loopback port. */
+function probeDaemon(port, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (ok) => { if (!settled) { settled = true; resolve(ok) } }
+
+    try {
+      const req = http.get(
+        { host: '127.0.0.1', port, path: '/config', timeout: timeoutMs },
+        (res) => { res.resume(); done(true) },
+      )
+      req.on('timeout', () => { req.destroy(); done(false) })
+      req.on('error', () => done(false))
+    } catch (err) { done(false) }
+  })
+}
+
+function launchDaemon() {
+  const exe = daemonPath()
+  if (!existsSync(exe)) return false
+  try {
+    const child = spawn(exe, [], { detached: true, stdio: 'ignore', windowsHide: true })
+    child.unref()
+    return true
+  } catch (err) {
+    return false
+  }
+}
+
+// one attempt at a time: a burst of checks must not spawn a crowd of daemons
+let daemonAttempt = null
+
+/** Probes, starts the service when it is down, and waits for it to come up. */
+function ensureDaemon(port, reason) {
+  if (daemonAttempt) return daemonAttempt
+
+  daemonAttempt = (async () => {
+    if (await probeDaemon(port, 700)) return true
+    if (!launchDaemon()) return false
+
+    console.log('[dsh-shot-button] shot service down (' + reason + '), starting ' + daemonPath())
+
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 500))
+      if (await probeDaemon(port, 700)) return true
+    }
+    return false
+  })()
+
+  daemonAttempt.then(
+    () => { daemonAttempt = null },
+    () => { daemonAttempt = null },
+  )
+  return daemonAttempt
+}
+
 /** Ask the resident service for a screenshot. */
 function captureViaDaemon(port, mode, timeoutMs, hide) {
   const hideQuery = hide ? '&hide=' + encodeURIComponent(hide) : ''
@@ -181,9 +250,14 @@ function apply(ctx) {
       const hide = url.searchParams.get('hide')
 
       captureViaDaemon(cfg.port, mode, 180000, hide)
-        .catch((err) => {
-          // service not running (or crashed): fall back to a one-shot process
-          console.warn('[dsh-shot-button] daemon capture failed, falling back to shot.exe:', String(err && err.message || err))
+        .catch(async (err) => {
+          // the service may simply have died: bring it back, try once more, and only
+          // then fall back to the slower one-shot process
+          console.warn('[dsh-shot-button] daemon capture failed:', String((err && err.message) || err))
+          if (await ensureDaemon(cfg.port, 'capture failed')) {
+            return captureViaDaemon(cfg.port, mode, 180000, hide)
+          }
+          console.warn('[dsh-shot-button] falling back to shot.exe')
           return captureViaSpawn(cfg.shotExe, mode, 60000)
         })
         .then((result) => {
@@ -211,15 +285,18 @@ function apply(ctx) {
   disposers.push(ctx.webServer.register({
     kind: 'exact',
     path: '/dsh-shot/status',
-    handler: (req, res) => {
+    handler: async (req, res) => {
       const cfg = readConfig()
       let clientBytes = 0
       try { clientBytes = readFileSync(CLIENT_FILE).length } catch (err) { /* ignore */ }
+      const daemonUp = await probeDaemon(cfg.port, 700)
       sendJson(res, 200, {
         plugin: name,
         packageRoot: PACKAGE_ROOT,
         config: cfg,
         clientBytes,
+        daemonUp,
+        daemonPath: daemonPath(),
         endpoints: ['/dsh-shot/client.js', '/dsh-shot/capture?mode=Full|Window|Region', '/dsh-shot/status'],
       })
     },
@@ -236,7 +313,19 @@ function apply(ctx) {
     return html + tag
   }))
 
+  // Bring the service up together with DSH, then keep an eye on it so a crash heals
+  // by itself instead of leaving the hotkeys and the hide feature silently dead.
+  setTimeout(() => {
+    ensureDaemon(readConfig().port, 'dsh startup').catch(() => { /* logged inside */ })
+  }, 2000)
+
+  const keepAlive = setInterval(() => {
+    ensureDaemon(readConfig().port, 'periodic check').catch(() => { /* logged inside */ })
+  }, 30000)
+  if (keepAlive.unref) keepAlive.unref()
+
   ctx.effect(() => () => {
+    try { clearInterval(keepAlive) } catch (err) { /* ignore */ }
     for (const d of disposers) {
       try { d() } catch (err) { /* ignore */ }
     }

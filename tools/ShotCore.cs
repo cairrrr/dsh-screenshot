@@ -69,6 +69,10 @@ internal static class Native
     [DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
 
+    /// <summary>Renders a window's own content into a DC, even when it is covered.</summary>
+    [DllImport("user32.dll")]
+    public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
@@ -371,13 +375,14 @@ internal static class ShotCore
             }
             else if (mode == "Window")
             {
-                Rectangle? picked = SelectWindow(screen);
+                IntPtr pickedHwnd;
+                Rectangle? picked = SelectWindow(screen, out pickedHwnd);
                 if (!picked.HasValue) return null;
 
                 Rectangle target = picked.Value;
                 target.Intersect(screen);
                 if (target.Width < 8 || target.Height < 8) target = screen;
-                bmp = Capture(target);
+                bmp = CaptureWindowContent(pickedHwnd, target);
             }
             else
             {
@@ -463,6 +468,68 @@ internal static class ShotCore
                 new Size(rect.Width, rect.Height), CopyPixelOperation.SourceCopy);
         }
         return bmp;
+    }
+
+    /// <summary>
+    /// Captures a window's own content. PrintWindow asks the window to draw itself, so
+    /// whatever happens to be covering it on screen does not end up in the picture. When
+    /// that yields nothing usable (some hardware-accelerated or minimised windows refuse),
+    /// it falls back to grabbing the screen rectangle instead.
+    /// </summary>
+    private static Bitmap CaptureWindowContent(IntPtr hwnd, Rectangle fallback)
+    {
+        if (hwnd != IntPtr.Zero)
+        {
+            try
+            {
+                Native.RECT r;
+                if (Native.TryGetWindowRect(hwnd, out r))
+                {
+                    int w = r.Right - r.Left;
+                    int h = r.Bottom - r.Top;
+                    if (w > 8 && h > 8 && w < 20000 && h < 20000)
+                    {
+                        Bitmap shot = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+                        bool ok;
+                        using (Graphics g = Graphics.FromImage(shot))
+                        {
+                            IntPtr hdc = g.GetHdc();
+                            try { ok = Native.PrintWindow(hwnd, hdc, 2); }   // PW_RENDERFULLCONTENT
+                            finally { g.ReleaseHdc(hdc); }
+                        }
+                        if (ok && !LooksEmpty(shot)) return shot;
+                        shot.Dispose();
+                    }
+                }
+            }
+            catch (Exception) { }
+        }
+        return Capture(fallback);
+    }
+
+    /// <summary>
+    /// True when PrintWindow claimed success but drew nothing: the bitmap stays fully
+    /// transparent or pure black. A uniformly *coloured* window is a perfectly good
+    /// capture, so uniform does not count as empty.
+    /// </summary>
+    private static bool LooksEmpty(Bitmap bmp)
+    {
+        try
+        {
+            int stepX = Math.Max(1, bmp.Width / 24);
+            int stepY = Math.Max(1, bmp.Height / 24);
+
+            for (int y = 0; y < bmp.Height; y += stepY)
+            {
+                for (int x = 0; x < bmp.Width; x += stepX)
+                {
+                    Color c = bmp.GetPixel(x, y);
+                    if (c.A != 0 && (c.R > 8 || c.G > 8 || c.B > 8)) return false;
+                }
+            }
+            return true;
+        }
+        catch (Exception) { return false; }
     }
 
     /// <summary>The dim layer: uniform dark, receives all mouse and key input.</summary>
@@ -607,11 +674,13 @@ internal static class ShotCore
     }
 
     /// <summary>Hover a window to highlight it, click to capture it.</summary>
-    private static Rectangle? SelectWindow(Rectangle screen)
+    private static Rectangle? SelectWindow(Rectangle screen, out IntPtr pickedHwnd)
     {
         IntPtr hovered = IntPtr.Zero;
         Rectangle hoveredFrame = Rectangle.Empty;
         bool accepted = false;
+        IntPtr chosen = IntPtr.Zero;
+        pickedHwnd = IntPtr.Zero;
 
         Form dim = CreateDimOverlay(screen, Cursors.Hand, 0.30);
         HighlightForm highlight = new HighlightForm();
@@ -655,6 +724,7 @@ internal static class ShotCore
             }
             if (e.Button == MouseButtons.Left && hovered != IntPtr.Zero && hoveredFrame.Width > 0)
             {
+                chosen = hovered;
                 accepted = true;
                 dim.Close();
             }
@@ -687,6 +757,7 @@ internal static class ShotCore
 
         if (!accepted || hoveredFrame.Width <= 0) return null;
         System.Threading.Thread.Sleep(120);         // let the overlay disappear before grabbing
+        pickedHwnd = chosen;
         return hoveredFrame;
     }
 }
